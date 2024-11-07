@@ -1,0 +1,9 @@
+# ignore folders:
+hit_road_marking_tracker/input_files/
+hit_road_marking_tracker/result_files/
+hit_road_marking_tracker/.conda/
+hit_road_marking_tracker/.ipynb_checkpoints/
+
+# ignore files:
+hit_road_marking_tracker/*.pt
+
