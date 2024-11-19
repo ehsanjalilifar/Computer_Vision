@@ -113,8 +113,19 @@ def getHomographyMatrix(orb, ref_kp, ref_des, frame, roi_compostite_mask, smooth
 def adjustPolygons(poly_dict, homography_matrix):
     adjusted_polygons = dict()
     for label, poly in poly_dict.items():
-        adjusted_polygons[label] = cv2.perspectiveTransform(poly['coords'].astype(np.float32).reshape(-1, 1, 2), homography_matrix)
+        _coords = cv2.perspectiveTransform(poly['coords'].astype(np.float32).reshape(-1, 1, 2), homography_matrix).reshape(-1, 2)
+        adjusted_polygons[label] = {
+            'coords': _coords,
+            'polygon': Polygon(_coords)
+        }
     return adjusted_polygons
+
+def saveFrame(dir, track_id, frame_count, frame):
+    dir = os.path.join(clean_dir, f'objectID_{track_id}')
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+    frame_filename = os.path.join(dir, f"frame_{frame_count:04d}_objectID_{track_id}.jpg")  # Generates filenames like frame_0001.jpg
+    cv2.imwrite(frame_filename, frame)
 
 ###########################################################################################################################################
 
@@ -195,83 +206,75 @@ while True:
     adjusted_lanes = adjustPolygons(lanes_dict, smoothed_homography)
     adjusted_markings = adjustPolygons(markings_dict, smoothed_homography)
 
-    frame_with_polygon = cv2.polylines(curr_frame, [np.int32(adjusted_markings['lane2'].reshape(-1, 2))], isClosed=True, color=(0, 255, 0), thickness=1)
-    cv2.imshow("Frame with Adjusted Polygon", frame_with_polygon)
+    # frame_with_polygon = cv2.polylines(curr_frame, [np.int32(adjusted_markings['lane2']['coords'])], isClosed=True, color=(0, 255, 0), thickness=1)
+    # cv2.imshow("Frame with Adjusted Polygon", frame_with_polygon)
 
+    annotator = Annotator(curr_frame, line_width=1)
 
-    # annotator = Annotator(curr_frame, line_width=1)
+    results = model.track(curr_frame, persist=True, imgsz=(1088, 1920), retina_masks=True)
+    # Result length will be >1  if you submit a batch for prediction.
 
-    # results = model.track(curr_frame, persist=True, imgsz=(1088, 1920), retina_masks=True)
-    # # Result length will be >1  if you submit a batch for prediction.
-
-    # if results[0].boxes.id is not None and results[0].masks is not None:
-    #     masks = results[0].masks.xy
-    #     boxes = results[0].boxes.xywh.cpu().numpy()
-    #     track_ids = results[0].boxes.id.int().cpu().tolist()
+    if results[0].boxes.id is not None and results[0].masks is not None:
+        masks = results[0].masks.xy
+        boxes = results[0].boxes.xywh.cpu().numpy()
+        track_ids = results[0].boxes.id.int().cpu().tolist()
         
-    #     for mask, track_id, box in zip(masks, track_ids,boxes):
-    #         # Get the zone for each object
-    #         for zone_id, polygon in lanes_dict.items():
-    #             # Get the middle point on the lower edge (on bounding box) as the tracking point. The center is buggy with the current camera view point.
-    #             # Remember the coordinate system's origin is top-left of the screen.
-    #             track_point = Point(box[0], box[1] + box[3]/2.0)
-    #             if  polygon.contains(track_point):
-    #                 # print(f"Object with ID={track_id} is in {zone_id}")
-    #                 # Check if the object hits the line (note: each zone has its own line)
-    #                 # We are only detecting the hit to one side of the vehicle.
+        for mask, track_id, box in zip(masks, track_ids,boxes):
+            # Get the zone for each object
+            for zone_id, lane in adjusted_lanes.items():
+                polygon = lane['polygon']
+                # Get the middle point on the lower edge (on bounding box) as the tracking point. The center is buggy with the current camera view point.
+                # Remember the coordinate system's origin is top-left of the screen.
+                track_point = Point(box[0], box[1] + box[3]/2.0)
+                if  polygon.contains(track_point):
+                    # print(f"Object with ID={track_id} is in {zone_id}")
+                    # Check if the object hits the line (note: each zone has its own line)
+                    # We are only detecting the hit to one side of the vehicle.
+                    # Now, we know the tracked object is in one of the zones.
+                    # Create a geometry out of the detected mask and check whether the tracked object hit the orange marking or not?
+                    if (zone_id in ['lane1', 'lane2', 'lane3']):
+                        hit_polygon = adjusted_markings[zone_id]['polygon'].intersection(Polygon(mask))
+                        if not (hit_polygon.is_empty): # A hit is detected
+                            # We define a true hit as hit that occurred in the lower 0.15 og the bounding box heigt. This lowers the falsely detected hits (e.g, top left of the vehicle hits the line. We only check the tires.)
+                            _,_,_,ymax = hit_polygon.bounds # Note that the origin is top-left. Thus, the ymax shows the lowest point on the screen
+                            bounding_box_height = box[3]
+                            bounding_box_ymax = box[1] + bounding_box_height/2.0
+                            ratio = abs(bounding_box_ymax - ymax) / bounding_box_height
+                            threshold = 0.15 # This parameter can be adjusted to get more accurate hits. It is the ratio of the hit's height to the bounding box's height.
+                            if(ratio < threshold):
+                                print(f"##################################################\n\nA hit detected betwen ID={track_id} and {zone_id}\n\n##################################################")
+                                hit_detected_in_the_frame = True
 
-    #                 # Now, we know the tracked object is in one of the zones.
-    #                 # Create a geometry out of the detected mask and check whether the tracked object hit the orange marking or not?
-    #                 if (zone_id in ['lane1', 'lane2', 'lane3']):
-    #                     hit_polygon = markings_dict[zone_id].intersection(Polygon(mask))
+                                # Save the unannotated frame.
+                                object_clean_dir = os.path.join(clean_dir, f'objectID_{track_id}')
+                                saveFrame(object_clean_dir, track_id, frame_count, curr_frame)
 
-    #                     # if(markings_dict[zone_id].intersects(Polygon(mask))):
-    #                     if not (hit_polygon.is_empty):
-    #                         _,_,_,ymax = hit_polygon.bounds # Note that the origin is top-left. Thus, the ymax shows the lowest point on the screen
-    #                         bounding_box_height = box[3]
-    #                         bounding_box_ymax = box[1] + bounding_box_height/2.0
-    #                         ratio = abs(bounding_box_ymax - ymax) / bounding_box_height
-    #                         threshold = 0.15 # This parameter can be adjusted to get more accurate hits. It is the ratio of the hit height to the bounding box height.
-    #                         if(ratio < threshold):
-    #                             print(f"##################################################\n\nA hit detected betwen ID={track_id} and {zone_id}\n\n##################################################")
-    #                             hit_detected_in_the_frame = True
+                                # Draw the marking for debugging:
+                                polygon_points = np.array(list(markings_dict['lane1']['polygon'].exterior.coords), dtype=np.int32)
+                                cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(51, 51, 51), thickness=2) # illustrated the hitted area.
+                                polygon_points = np.array(list(markings_dict['lane2']['polygon'].exterior.coords), dtype=np.int32)
+                                cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(240, 128, 128), thickness=2) # illustrated the hitted area.
 
-    #                             # Save the unannotated frame.
-    #                             object_clean_dir = os.path.join(clean_dir, f'objectID_{track_id}')
-    #                             if not os.path.exists(object_clean_dir):
-    #                                 os.makedirs(object_clean_dir)
-    #                             frame_filename = os.path.join(object_clean_dir, f"frame_{frame_count:04d}_objectID_{track_id}.jpg")  # Generates filenames like frame_0001.jpg
-    #                             cv2.imwrite(frame_filename, curr_frame)
-
-    #                             # Draw the marking for debugging:
-    #                             polygon_points = np.array(list(markings_dict['lane1'].exterior.coords), dtype=np.int32)
-    #                             cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(51, 51, 51), thickness=2) # illustrated the hitted area.
-    #                             polygon_points = np.array(list(markings_dict['lane2'].exterior.coords), dtype=np.int32)
-    #                             cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(240, 128, 128), thickness=2) # illustrated the hitted area.
-
-    #                             # Save the annotated frame.
-    #                             annotator.seg_bbox(mask=mask,
-    #                                 mask_color=colors(track_id, True),
-    #                                 label=f"{zone_id}_id{track_id}",
-    #                                 txt_color=(0,0,0))
+                                # Save the annotated frame.
+                                annotator.seg_bbox(mask=mask,
+                                    mask_color=colors(track_id, True),
+                                    label=f"{zone_id}_id{track_id}",
+                                    txt_color=(0,0,0))
                                 
-    #                             if isinstance(hit_polygon, Polygon):
-    #                                 polygon_points = np.array(list(hit_polygon.exterior.coords), dtype=np.int32)
-    #                                 cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(255, 0, 0), thickness=2) # illustrated the hitted area.
-    #                             elif isinstance(hit_polygon, MultiPolygon):
-    #                                 for _poly in hit_polygon.geoms:
-    #                                     polygon_points = np.array(list(_poly.exterior.coords), dtype=np.int32)
-    #                                     cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(255, 0, 0), thickness=2) # illustrated the hitted area.
+                                if isinstance(hit_polygon, Polygon):
+                                    polygon_points = np.array(list(hit_polygon.exterior.coords), dtype=np.int32)
+                                    cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(255, 0, 0), thickness=2) # illustrated the hitted area.
+                                elif isinstance(hit_polygon, MultiPolygon):
+                                    for _poly in hit_polygon.geoms:
+                                        polygon_points = np.array(list(_poly.exterior.coords), dtype=np.int32)
+                                        cv2.polylines(curr_frame, [polygon_points], isClosed=True, color=(255, 0, 0), thickness=2) # illustrated the hitted area.
 
-    #                             object_annotated_dir = os.path.join(annotated_dir, f'objectID_{track_id}')
-    #                             if not os.path.exists(object_annotated_dir):
-    #                                 os.makedirs(object_annotated_dir)
-    #                             frame_filename = os.path.join(object_annotated_dir, f"frame_{frame_count:04d}_objectID_{track_id}_annotated.jpg")  # Generates filenames like frame_0001.jpg
-    #                             cv2.imwrite(frame_filename, curr_frame)
+                                object_annotated_dir = os.path.join(annotated_dir, f'objectID_{track_id}')
+                                saveFrame(object_annotated_dir, track_id, frame_count, curr_frame)
             
-    # cv2.imshow("instance-segmentation-object-tracking", curr_frame)
+    cv2.imshow("instance-segmentation-object-tracking", curr_frame)
     # break
-    # frame_count+=1
+    frame_count+=1
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
