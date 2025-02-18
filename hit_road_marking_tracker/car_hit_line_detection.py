@@ -1,4 +1,5 @@
-import os, shutil, cv2, time, argparse
+# print("importing libraries")
+import os, shutil, cv2, time, argparse, csv, json
 import numpy as np
 import matplotlib.pyplot as plt
 import xml.etree.ElementTree as ET
@@ -6,6 +7,9 @@ from shapely.geometry import Point, Polygon, MultiPolygon
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator, colors
 from collections import defaultdict
+import pandas as pd
+# print("all libraries are imported")
+
 
 def plot(masks, boxes, height):
     for mask, box in zip(masks, boxes):
@@ -20,27 +24,57 @@ def plot(masks, boxes, height):
         plt.scatter(box[0], height-box[1], s=10)
     plt.show()
 
-def loadPolygon(relative_path):
-    xml_directory = os.path.join(os.getcwd(), relative_path)
-    tree = ET.parse(f'{xml_directory}')
-    root = tree.getroot()
-    polygons = root.findall('.//polygon')
+def loadPolygon(relative_path, image_name):
+    ### CVAT INPUT
+    # xml_directory = os.path.join(os.getcwd(), relative_path)
+    # tree = ET.parse(f'{xml_directory}')
+    # root = tree.getroot()
+    # print(f'image name is {image_name}')
+    # for image in root.findall("image"):
+    #     if image.get("name") == image_name:
+    #         polygons = image.findall('polygon')
+    #         poly_dict = dict()
+    #         for polygon in polygons:
+    #             label = polygon.get('label')
+    #             id = polygon.find('attribute')
+    #             if id != None:
+    #                 label = label+id.text
+    #             points_list = (polygon.get('points')).split(';')
+    #             points = [list(map(float, point.split(','))) for point in points_list]
+    #             _polygon = Polygon(points) # For geometry operations.
+    #             _coords = [tuple(map(float, point.split(','))) for point in points_list]
+    #             _coords = np.array([_coords], dtype=np.int32) # For frame/pixel operations.
+    #             poly_dict[label] = {
+    #                 'polygon': _polygon,
+    #                 'coords': _coords
+    #             }
+    #         return poly_dict
+    # print('Error: could not the load polygons!')
+
+    ### LABEL STUDIO INPUT
+    file_path = os.path.join(os.getcwd(), relative_path)
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+
     poly_dict = dict()
-    for polygon in polygons:
-        label = polygon.get('label')
-        id = polygon.find('attribute')
-        if id != None:
-            label = label+id.text
-        points_list = (polygon.get('points')).split(';')
-        points = [list(map(float, point.split(','))) for point in points_list]
-        _polygon = Polygon(points) # For geometry operations.
-        _coords = [tuple(map(float, point.split(','))) for point in points_list]
-        _coords = np.array([_coords], dtype=np.int32) # For frame/pixel operations.
-        poly_dict[label] = {
-            'polygon': _polygon,
-            'coords': _coords
-        }
-    return poly_dict
+    for record in data:
+        _image_name = record['image'].split('/')[-1].split('-')[-1][:-4] # extract name of the image used for the drawings
+        if (_image_name == image_name):
+            print(f'image name is {_image_name}')
+            for annotation in record['label']:
+                label = annotation['polygonlabels'][0] # assigned label to the polygon one of ['lane1', 'lane2', 'shoulder1', 'shoulder2']
+                # The Label Studio output is the between 0 to 100. So, we scale them to the original heights and width in pixel coordinates.
+                widthScaleFactor = annotation['original_width'] / 100.0
+                heightScaleFactor = annotation['original_height'] / 100.0
+                original_coord_points = [[w * widthScaleFactor, h * heightScaleFactor] for w, h in annotation['points']]
+                poly_dict[label] = {
+                    'polygon': Polygon(original_coord_points),
+                    'coords': np.array(original_coord_points)
+                }
+            return poly_dict
+    print('Error: could not the load polygons!')
+    return None
+
 
 def createROIMask(relative_path, base_frame):
     file_path = os.path.join(os.getcwd(), relative_path)
@@ -79,30 +113,45 @@ def createROIMask(relative_path, base_frame):
 #     cv2.waitKey(0)
 #     cv2.destroyAllWindows()
 
-def getHomographyMatrix(orb, ref_kp, ref_des, frame, roi_compostite_mask, smoothed_homography):
+def getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, frame, roi_compostite_mask, smoothed_homography):
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     # Detect and match key points in the new frame
     kp, des = orb.detectAndCompute(frame_gray, roi_compostite_mask)
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
     matches = matcher.match(ref_des, des)
     matches = sorted(matches, key=lambda x: x.distance)
-    good_matches = matches[:50] # Use the X top matches. we can adjust the number as needed.
+    matchedPointsLimit = 200
+    good_matches = matches
+    if (len(good_matches) > matchedPointsLimit):
+        good_matches = matches[:matchedPointsLimit] # Use the X top matches. we can adjust the number as needed.
 
     # Extract matched key points
     src_pts = np.float32([ref_kp[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)  # reshapes are necessary.
     dst_pts = np.float32([kp[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
+    ### DEBUG ###
+    # matches_img = cv2.drawMatches(ref_gray, ref_kp, frame_gray, kp, good_matches, None)
+    # cv2.imshow("Matches", matches_img)
+
     # Compute homography if enough matches found
-    if len(good_matches) >= 4:
-        ransacReprojThreshold = 5.0
+    if len(good_matches) >= 10:
+        ransacReprojThreshold = 1.0
         homography_matrix, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransacReprojThreshold)
 
-        # Stabilize the jittery homography
-        if smoothed_homography is None:
-            smoothed_homography = homography_matrix
-        else:
-            smoothed_homography = alpha * smoothed_homography + (1.0 - alpha) * homography_matrix
+        # Reject unstable homographies
+        if homography_matrix is not None:
+            det = cv2.determinant(homography_matrix)
+            # print(f"--> NOTE: det = {det} <--")
+            # if det < 0.9 or det > 1.1: # These threshold are assigned based on the observed determinant per frame
+            if det < 0.1 or det > 10: # These threshold are assigned based on the observed determinant per frame
+                print("ALARM: Skipping frame with unstable homography!!!")
+            else:
+                # Stabilize the jittery homography
+                if smoothed_homography is None:
+                    smoothed_homography = homography_matrix
+                else:
+                    smoothed_homography = alpha * smoothed_homography + (1.0 - alpha) * homography_matrix
     else:
         print("Not enough matches to compute homography")
     
@@ -128,45 +177,55 @@ def saveFrame(dir, track_id, frame_count, frame):
 def drawPolygonsOnFrame(poly, frame, color):
     if isinstance(poly, Polygon):
         polygon_points = np.array(list(poly.exterior.coords), dtype=np.int32)
-        cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=2) # illustrated the hitted area.
+        cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=1) # illustrated the hitted area.
     elif isinstance(poly, MultiPolygon):
         for _poly in poly.geoms:
             polygon_points = np.array(list(_poly.exterior.coords), dtype=np.int32)
-            cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=2) # illustrated the hitted area.
+            cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=1) # illustrated the hitted area.
     return frame
 
-def addToLaneHistory(history, track_id, zone_id):
+def addToVehicleHistory(history, track_id, zone_id):
     history[track_id][zone_id] =  history[track_id][zone_id] + 1
+
+def isHitAtTheBottom(hitYMax, screenHeight):
+    return (hitYMax > 0.93 * screenHeight)
+
 ###########################################################################################################################################
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Segmentation and Tracking with YOLO")
     parser.add_argument("--model", type=str, required=True, help="YOLO model name")
     parser.add_argument("--source", type=str, required=True, help="input video filename")
+    parser.add_argument("--lanes", type=str, required=True, help="road's lanes polygon boundaries")
+    parser.add_argument("--markings", type=str, required=True, help="road's orange markinging polygon boundaries")
+    parser.add_argument("--rois", type=str, required=True, help="regions of interest polygon boundaries")
     args = parser.parse_args()
 
     print("------ INPUT FILES -----")
-
+    video_name = args.source[:-4]
     # lanes_dic contains the lanes' geometries. Key is the lane name and value is the polygon geometry.
-    lanes_dict = loadPolygon('input_files/XMLs/ntta_lanes.xml')
+    # lanes_dict = loadPolygon(f'input_files/XMLs/{args.lanes}.xml', f'frame_zero_{video_name}.png')
+    lanes_dict = loadPolygon(f'input_files/JSON/{args.lanes}.json', f'frame_zero_{video_name}')
     print(f"{len(lanes_dict)} polygons defining the lanes were loaded.")
 
     # markings_dict contains the orange markings' geometries. Key is the marking associated with the lane and value is the polygon geometry.
-    markings_dict = loadPolygon('input_files/XMLs/orange_markings.xml')
+    # markings_dict = loadPolygon(f'input_files/XMLs/{args.markings}.xml', f'frame_zero_{video_name}.png')
+    markings_dict = loadPolygon(f'input_files/JSON/{args.markings}.json', f'frame_zero_{video_name}')
     print(f"{len(markings_dict)} polygons defining the markings were loaded.")
 
     print("----- MODEL DEFINITION -----")
     model_name = args.model
-    model = YOLO(model_name)   # segmentation model
+    model = YOLO(f"model/{model_name}")   # segmentation model
     print(f"Model: {model_name}")
     model.to('cuda')
 
     # Read the input video.
-    video_directory = os.path.join(os.getcwd(), 'input_files/Videos/Stream_1')
+    video_directory = os.path.join(os.getcwd(), 'input_files/Videos/Stream_2')
     source_filename = args.source
     cap = cv2.VideoCapture(f"{video_directory}/{source_filename}")
     print(f"Source file: {source_filename}")
-    w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
-    print(f"Video Specification: width = {w}, height ={h}, fps = {fps}")
+    screenWidth, screenHeights, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
+    print(f"Video Specification: width = {screenWidth}, height ={screenHeights}, fps = {fps}")
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     # Create the necessary directories to save the results.
     results_directory = os.path.join(os.getcwd(), f'result_files/{source_filename[:-4]}')
@@ -177,6 +236,7 @@ if __name__ == "__main__":
 
     os.makedirs(os.path.join(results_directory, 'annotated'))
     os.makedirs(os.path.join(results_directory, 'clean'))
+    os.makedirs(os.path.join(results_directory, 'summary'))
     print(f"Directory '{results_directory}' created.")
 
     annotated_dir = os.path.join(results_directory, 'annotated')
@@ -185,33 +245,49 @@ if __name__ == "__main__":
     # Read the first frame and detect key points. Key points are matched between frames to estimate the camera movements.
     ret, ref_frame = cap.read()
     # ref_gray = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY) # Read from the first frame
-    ref_path = os.path.join(os.getcwd(), 'input_files/Photos/scene_zero.png')
+    ref_path = os.path.join(os.getcwd(), f'input_files/Photos/frame_zero_{video_name}.png')
     ref_gray = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
 
     # ROIs
     # Region of Interests (ROIs) are defined to limit the area used for key point detection. 
     # Only the static part of the frame which won't be occluded should be used for key point detection.
     # Create the composite mask which contains of a couple of polygons.
-    rois_dict, roi_compostite_mask = createROIMask('input_files/XMLs/ROIs.xml', ref_gray)
+    rois_dict, roi_compostite_mask = createROIMask(f'input_files/XMLs/{args.rois}.xml', ref_gray)
 
     # Initialize ORB detector. 
     # This algorithm is used to estimate the camera movements (translation, rotation, and scale) to stabilize the camera movements.
     # Camera movements cause the polygons location instability. The lane and marking polygons location must always match with their physical location on the road.
-    orb = cv2.ORB_create()
+    # orb = cv2.ORB_create(scaleFactor=1.8)
+    orb = cv2.SIFT_create()
 
     # Find the key points and descriptors in the reference frame (frame_zero)
     ref_kp, ref_des = orb.detectAndCompute(ref_gray, roi_compostite_mask)
-    # displayKeyPoints(ref_frame, ref_kp, roi_compostite_mask)
+
+    ### DEBUG ###
+    # displayKeyPoints(ref_gray, ref_kp, roi_compostite_mask)
 
     smoothed_homography = None
     alpha = 0.8 # Smoothing factor for jittery frame stabilization (higher = more smoothing)
-    lane_history = defaultdict(lambda: {
+    vehicles_history = defaultdict(lambda: {
         'shoulder1': 0,
         'shoulder2': 0,
         'lane1': 0,
         'lane2': 0,
-        'lane3': 0
+        # 'lane3': 0
     }) # Stores the number of frames each vehicle was in while passing the recorded road section.
+    # It's a dictionaty with object/vehicle ID as key. The value itself is a dictionary with names of the lanes as key and the number of the frames that the specific vehicle was present in a specific lane as value.
+
+    # Stores ID's of the vehicles that entered to each of the specific zone (keys)
+    # In each frame ID's of the vehicle inside the zone will be added to the zone. We use Set datatype to prevent duplication.
+    # If a vehicle ID is present in two sets, it indicates a "lane changing" event.
+    lanes_history = {
+        'shoulder1': set(),
+        'shoulder2': set(),
+        'lane1': set(),
+        'lane2': set(),
+        # 'lane3': set()
+    }
+    hit_set = set()
     frame_count = 0
     error_counter = 0
     start_time = time.time()
@@ -222,67 +298,88 @@ if __name__ == "__main__":
         if not ret:
             print("Video frame is empty or video processing has been successfully completed.")
             break
+        if(frame_count % 2 == 0): # skip frames to speed-up. It comes at the cost of reduced accuracy (possibly missing a barely hit situation).
+            # Adjust the polygons locations w.r.t the camera movements.
+            smoothed_homography = getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, curr_frame, roi_compostite_mask, smoothed_homography)
+            adjusted_lanes = adjustPolygons(lanes_dict, smoothed_homography)
+            adjusted_markings = adjustPolygons(markings_dict, smoothed_homography)
 
-        # Adjust the polygons locations w.r.t the camera movements.
-        smoothed_homography = getHomographyMatrix(orb, ref_kp, ref_des, curr_frame, roi_compostite_mask, smoothed_homography)
-        adjusted_lanes = adjustPolygons(lanes_dict, smoothed_homography)
-        adjusted_markings = adjustPolygons(markings_dict, smoothed_homography)
+            # results = model.track(curr_frame, persist=True, imgsz=(1088, 1920), retina_masks=True)
+            if (frame_count % 1000 == 0):
+                print(f'\n#### {int(frame_count/total_frames*100)}% COMPLETED ####')
+                elapsed_time = time.time() - start_time
+                print(f"Elapsed Time: {elapsed_time:.2f} seconds")
+                print(f'Processed {frame_count} frames out of {total_frames} by {time.strftime("%H:%M:%S", time.localtime(time.time() - start_time))}')
+                print(f"Process time per frame:")
+                results = model.track(curr_frame, persist=True, retina_masks=True, verbose=True)
+            else:
+                results = model.track(curr_frame, persist=True, retina_masks=True, verbose=False)
+            # Result length will be >1  if you submit a batch for prediction.
 
-        results = model.track(curr_frame, persist=True, imgsz=(1088, 1920), retina_masks=True)
-        # Result length will be >1  if you submit a batch for prediction.
+            ### DEBUG ###
+            # print(f"MARKINGS --> {adjusted_markings['lane1']['polygon']}")
+            # curr_frame = drawPolygonsOnFrame(adjusted_markings['lane1']['polygon'], curr_frame, (255, 0, 0)) 
+            # curr_frame = drawPolygonsOnFrame(adjusted_markings['lane2']['polygon'], curr_frame, (255, 0, 0)) 
+            # # label the hitted object.
+            # annotator = Annotator(curr_frame, line_width=2)
+            ### DEBUG ###
 
-        if results[0].boxes.id is not None and results[0].masks is not None:
-            masks = results[0].masks.xy
-            boxes = results[0].boxes.xywh.cpu().numpy()
-            track_ids = results[0].boxes.id.int().cpu().tolist()
-            
-            for mask, track_id, box in zip(masks, track_ids,boxes):
-                # Get the zone for each object
-                for zone_id, lane in adjusted_lanes.items():
-                    polygon = lane['polygon']
-                    # Get the middle point on the lower edge (on bounding box) as the tracking point. The center is buggy with the current camera view point.
-                    # Remember the coordinate system's origin is top-left of the screen.
-                    track_point = Point(box[0], box[1] + box[3]/2.0)
-                    if  polygon.contains(track_point):
-                        addToLaneHistory(lane_history, track_id, zone_id)
-                        # print(f"Object with ID={track_id} is in {zone_id}")
-                        # Check if the object hits the line (note: each zone has its own line)
-                        # We are only detecting the hit to one side of the vehicle.
-                        # Now, we know the tracked object is in one of the zones.
-                        # Create a geometry out of the detected mask and check whether the tracked object hit the orange marking or not?
-                        if (zone_id in ['lane1', 'lane2', 'lane3']):
-                            try:
-                                hit_polygon = adjusted_markings[zone_id]['polygon'].intersection(Polygon(mask))
-                                if not (hit_polygon.is_empty): # A hit is detected
-                                    # We define a true hit as hit that occurred in the lower 0.15 of the bounding box heigt. This lowers the falsely detected hits (e.g, top left of the vehicle hits the line. We only check the tires.)
-                                    _,_,_,ymax = hit_polygon.bounds # Note that the origin is top-left. Thus, the ymax shows the lowest point on the screen
-                                    bounding_box_height = box[3]
-                                    bounding_box_ymax = box[1] + bounding_box_height/2.0
-                                    ratio = abs(bounding_box_ymax - ymax) / bounding_box_height
-                                    threshold = 0.15 # This parameter can be adjusted to get more accurate hits. It is the ratio of the hit's height to the bounding box's height.
-                                    if(ratio < threshold):
-                                        print(f"##################################################\n\nA hit detected betwen ID={track_id} and {zone_id}\n\n##################################################")
-                                        hit_detected_in_the_frame = True
-                                        # Save the unannotated frame.
-                                        saveFrame(clean_dir, track_id, frame_count, curr_frame)
-                                        # Draw the marking for debugging.
-                                        curr_frame = drawPolygonsOnFrame(adjusted_markings[zone_id]['polygon'], curr_frame, (51, 51, 51)) 
-                                        # label the hitted object.
-                                        annotator = Annotator(curr_frame, line_width=1)
-                                        annotator.seg_bbox(mask=mask,
-                                            mask_color=colors(track_id, True),
-                                            label=f"{zone_id}_id{track_id}",
-                                            txt_color=(0,0,0))
-                                        # Highlight the hitted area.
-                                        curr_frame = drawPolygonsOnFrame(hit_polygon, curr_frame, (255, 0, 0))
-                                        # Save the annotated frame.
-                                        saveFrame(annotated_dir, track_id, frame_count, curr_frame)
-                            except Exception as e:
-                                error_counter += 1
-                                print(f"Error: {e}")
+            if results[0].boxes.id is not None and results[0].masks is not None:
+                masks = results[0].masks.xy
+                boxes = results[0].boxes.xywh.cpu().numpy()
+                track_ids = results[0].boxes.id.int().cpu().tolist()
                 
-        # cv2.imshow("instance-segmentation-object-tracking", curr_frame)
-        # break
+                for mask, track_id, box in zip(masks, track_ids,boxes):
+                    # Get the zone for each object
+                    for zone_id, lane in adjusted_lanes.items():
+                        polygon = lane['polygon']
+                        # Get the middle point on the lower edge (on bounding box) as the tracking point. The center is buggy with the current camera view point.
+                        # Remember the coordinate system's origin is top-left of the screen.
+                        track_point = Point(box[0], box[1] + box[3]/2.0) # track the vehicles at the bottom-middle of the bounding box for higher eaccuracy.
+                        if  polygon.contains(track_point):
+                            lanes_history[zone_id].add(track_id) # Add the vehicle ID to the history of the lane
+                            addToVehicleHistory(vehicles_history, track_id, zone_id)
+                            # print(f"Object with ID={track_id} is in {zone_id}")
+                            # Check if the object hits the line (note: each zone has its own line)
+                            # We are only detecting the hit to one side of the vehicle.
+                            # Now, we know the tracked object is in one of the zones.
+                            # Create a geometry out of the detected mask and check whether the tracked object hit the orange marking or not?
+                            if (zone_id in ['lane1', 'lane2', 'lane3']):
+                                try:
+                                    hit_polygon = adjusted_markings[zone_id]['polygon'].intersection(Polygon(mask))
+                                    if not (hit_polygon.is_empty): # A hit is detected
+                                        # We define a true hit as hit that occurred in the lower 0.15 of the bounding box heigt. This lowers the falsely detected hits (e.g, top left of the vehicle hits the line. We only check the tires.)
+                                        _,_,_,ymax = hit_polygon.bounds # Note that the origin is top-left. Thus, the ymax shows the lowest point on the screen
+                                        bounding_box_height = box[3]
+                                        bounding_box_ymax = box[1] + bounding_box_height/2.0
+                                        ratio = abs(bounding_box_ymax - ymax) / bounding_box_height
+                                        threshold = 0.15 # This parameter can be adjusted to get more accurate hits. It is the ratio of the hit's height to the bounding box's height.
+                                        # Exclude partially detected vehicles. When a vehicle is on edges of the screen, it is partially visible to the camera and the segmentation does not represent the whole vehicle. Additionally, the view is occluded.
+                                        if((ratio < threshold) & (not isHitAtTheBottom(ymax, screenHeights))):
+                                            print(f"Vehicle with Obeject_id {track_id} hitted {zone_id}!")
+                                            hit_detected_in_the_frame = True
+                                            hit_set.add(track_id)
+                                            # Save the unannotated frame.
+                                            saveFrame(clean_dir, track_id, frame_count, curr_frame)
+                                            # Draw the marking for debugging.
+                                            curr_frame = drawPolygonsOnFrame(adjusted_markings[zone_id]['polygon'], curr_frame, (51, 51, 51)) 
+                                            # label the hitted object.
+                                            annotator = Annotator(curr_frame, line_width=1)
+                                            annotator.seg_bbox(mask=mask,
+                                                mask_color=colors(track_id, True),
+                                                label=f"{zone_id}_id{track_id}",
+                                                txt_color=(0,0,0))
+                                            # Highlight the hitted area.
+                                            curr_frame = drawPolygonsOnFrame(hit_polygon, curr_frame, (255, 0, 0))
+                                            # Save the annotated frame.
+                                            saveFrame(annotated_dir, track_id, frame_count, curr_frame)
+                                except Exception as e:
+                                    error_counter += 1
+                                    print(f"Error: {e}")
+                    
+            # cv2.imshow("instance-segmentation-object-tracking", curr_frame)
+            # if frame_count == 10:
+            #     break
         frame_count+=1
 
         # if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -293,7 +390,46 @@ if __name__ == "__main__":
     end_time = time.time()
     hours, remainder = divmod(end_time - start_time, 3600)
     minutes, seconds = divmod(remainder, 60)
+    print()
     print(f"Analysis succesfully completed.")
     print(f"{error_counter} exception occurred during analysis!")
     print(f"Elapsed time: {int(hours):02}:{int(minutes):02}:{int(seconds):02}")
+    history_df = pd.DataFrame.from_dict(vehicles_history, orient='index', columns=['lane1', 'lane2'])
+    history_df.to_csv('lane_changes_history.csv')
 
+    # Traffic Volume and Lane Changing Events
+    print("\n### Lane Changes Summary ###")
+    lane_change_file_path = os.path.join(os.getcwd(), f'result_files/{source_filename[:-4]}/summary/lane_changes.csv')
+    pairs = [['shoulder1', 'lane1'], ['lane1', 'lane2'], ['lane2', 'shoulder2']]
+    sum_lane_changes = 0
+    with open(lane_change_file_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['lane #1', 'lane #2', 'number_of_lane_changes'])
+        for pair in pairs:
+            lane1_history = lanes_history[pair[0]]
+            lane2_history = lanes_history[pair[1]]
+            n_lane_changes = len(lane1_history & lane2_history)
+            sum_lane_changes += n_lane_changes
+            print(f"Number of lane changes between {pair[0]} and {pair[1]} = {n_lane_changes}")
+            writer.writerow([pair[0], pair[1], n_lane_changes])
+
+    print("\n### Traffic Volume ### ")
+    volume_file_path = os.path.join(os.getcwd(), f'result_files/{source_filename[:-4]}/summary/traffic_volumes.csv')
+    total_set = set()
+    with open(volume_file_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['lane #1', 'vehicle_counts'])
+        for lane, vehicles_set in lanes_history.items():
+            print(f"Vehicles count in {lane} = {len(vehicles_set)}")
+            writer.writerow([lane, len(vehicles_set)])
+            total_set = total_set | vehicles_set
+    
+        print(f"Total road volume = {len(total_set)}")
+        writer.writerow(['All', len(total_set)])
+        writer.writerow(['TOTAL HITS', len(hit_set)])
+        writer.writerow(['TOTAL LANE CHANGES', sum_lane_changes])
+        writer.writerow(['TOTAL HITS EXCLUDING LANE CHANGES', len(hit_set) - sum_lane_changes])
+
+    print(f'\nTOTAL NUMBER OF HITS = {len(hit_set)}')
+    print(f'TOTAL NUMBER OF LANE CHANGES = {sum_lane_changes}')
+    print(f'TOTAL NUMBER OF HITS EXCLUDING LANE CHANGES = {len(hit_set) - sum_lane_changes}')
