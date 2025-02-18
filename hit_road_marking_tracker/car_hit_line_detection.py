@@ -77,29 +77,60 @@ def loadPolygon(relative_path, image_name):
 
 
 def createROIMask(relative_path, base_frame):
-    file_path = os.path.join(os.getcwd(), relative_path)
-    tree = ET.parse(f'{file_path}')
-    root = tree.getroot()
-    rois = root.findall('.//polygon') # Regions Of Interest are locations in the image where we are looking for key points to adjust the camera rotation/shift.
+    ### CVAT Input
+    # file_path = os.path.join(os.getcwd(), relative_path)
+    # tree = ET.parse(f'{file_path}')
+    # root = tree.getroot()
+    # rois = root.findall('.//polygon') # Regions Of Interest are locations in the image where we are looking for key points to adjust the camera rotation/shift.
     
+    # rois_dict = dict()
+    # roi_masks_list = []
+    # cnt = 0
+
+    # for polygon in rois:
+    #     cnt += 1 # An enumerator to distinguish between different polygons. Can also be addressed in the input file.
+    #     label = f"{polygon.get('label')}_{cnt}"
+    #     # Re-format the points coordinate to create an image mask. The mask confines the location of the key points.
+    #     points_list = (polygon.get('points')).split(';')
+    #     points = [tuple(map(float, point.split(','))) for point in points_list]
+    #     roi_vertices = np.array([points], dtype=np.int32)
+    #     roi_mask = np.zeros_like(base_frame)
+    #     cv2.fillPoly(roi_mask, roi_vertices, 255) # The mask is a black and white filter for bitwise operation.
+    #     rois_dict[label] = {
+    #         'vertices': roi_vertices,
+    #         'mask': roi_mask
+    #     }
+    #     roi_masks_list.append(roi_mask)
+
+    # roi_compostite_mask = roi_masks_list[0]
+    # for mask in roi_masks_list[1:]:
+    #     roi_compostite_mask = cv2.bitwise_or(roi_compostite_mask, mask)
+
+    # return rois_dict, roi_compostite_mask
+
+    ### Label Studio Input
+    file_path = os.path.join(os.getcwd(), relative_path)
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    cnt = 0
     rois_dict = dict()
     roi_masks_list = []
-    cnt = 0
-
-    for polygon in rois:
-        cnt += 1 # An enumerator to distinguish between different polygons. Can also be addressed in the input file.
-        label = f"{polygon.get('label')}_{cnt}"
-        # Re-format the points coordinate to create an image mask. The mask confines the location of the key points.
-        points_list = (polygon.get('points')).split(';')
-        points = [tuple(map(float, point.split(','))) for point in points_list]
-        roi_vertices = np.array([points], dtype=np.int32)
-        roi_mask = np.zeros_like(base_frame)
-        cv2.fillPoly(roi_mask, roi_vertices, 255) # The mask is a black and white filter for bitwise operation.
-        rois_dict[label] = {
-            'vertices': roi_vertices,
-            'mask': roi_mask
-        }
-        roi_masks_list.append(roi_mask)
+    for record in data:
+        for annotation in record['label']:
+            cnt += 1
+            label = f"{annotation['polygonlabels'][0]}_{cnt}" # assigned label to the polygon one of ['lane1', 'lane2', 'shoulder1', 'shoulder2']
+            # The Label Studio output is the between 0 to 100. So, we scale them to the original heights and width in pixel coordinates.
+            widthScaleFactor = annotation['original_width'] / 100.0
+            heightScaleFactor = annotation['original_height'] / 100.0
+            original_coord_points = [[w * widthScaleFactor, h * heightScaleFactor] for w, h in annotation['points']]
+            roi_vertices = np.array(original_coord_points, dtype=np.int32).reshape(-1, 1, 2)
+            roi_mask = np.zeros_like(base_frame)
+            cv2.fillPoly(roi_mask, [roi_vertices], 255) # The mask is a black and white filter for bitwise operation.
+            rois_dict[label] = {
+                'vertices': roi_vertices,
+                'mask': roi_mask
+            }
+            roi_masks_list.append(roi_mask)
 
     roi_compostite_mask = roi_masks_list[0]
     for mask in roi_masks_list[1:]:
@@ -252,7 +283,7 @@ if __name__ == "__main__":
     # Region of Interests (ROIs) are defined to limit the area used for key point detection. 
     # Only the static part of the frame which won't be occluded should be used for key point detection.
     # Create the composite mask which contains of a couple of polygons.
-    rois_dict, roi_compostite_mask = createROIMask(f'input_files/XMLs/{args.rois}.xml', ref_gray)
+    rois_dict, roi_compostite_mask = createROIMask(f'input_files/JSON/{args.rois}.json', ref_gray)
 
     # Initialize ORB detector. 
     # This algorithm is used to estimate the camera movements (translation, rotation, and scale) to stabilize the camera movements.
