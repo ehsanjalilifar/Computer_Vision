@@ -63,7 +63,7 @@ def createROIMask(relative_path, base_frame):
     for record in data:
         for annotation in record['label']:
             cnt += 1
-            label = f"{annotation['polygonlabels'][0]}_{cnt}" # assigned label to the polygon one of ['lane1', 'lane2', 'shoulder1', 'shoulder2']
+            label = f"{annotation['polygonlabels'][0]}_{cnt}" # assigned label to the polygon one of ['ROI1', 'ROI2', ...]
             # The Label Studio output is the between 0 to 100. So, we scale them to the original heights and width in pixel coordinates.
             widthScaleFactor = annotation['original_width'] / 100.0
             heightScaleFactor = annotation['original_height'] / 100.0
@@ -122,7 +122,7 @@ def getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, frame, roi_compostite_ma
             # print(f"--> NOTE: det = {det} <--")
             # if det < 0.9 or det > 1.1: # These threshold are assigned based on the observed determinant per frame
             if det < 0.1 or det > 10: # These threshold are assigned based on the observed determinant per frame
-                print("ALARM: Skipping frame with unstable homography!!!")
+                print("Warning: Skipping frame with unstable homography!!!")
             else:
                 # Stabilize the jittery homography
                 if smoothed_homography is None:
@@ -185,6 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--lanes", type=str, required=True, help="road's lanes polygon boundaries")
     parser.add_argument("--markings", type=str, required=True, help="road's orange markinging polygon boundaries")
     parser.add_argument("--rois", type=str, required=True, help="regions of interest polygon boundaries")
+    parser.add_argument("--zoom", type=str, required=True, help="regions defining the boundaries for object detection")
     parser.add_argument("--skipframes", type=int, required=False, default=0, help="number of frames to be skipped between analyzed frames")
     parser.add_argument("--logstep", type=int, required=False, default=1000, help="log the progress every logstep frames")
     parser.add_argument("--debug", type=bool, required=False, default=False, help="run in debug mode for more info")
@@ -242,8 +243,10 @@ if __name__ == "__main__":
     # Region of Interests (ROIs) are defined to limit the area used for key point detection. 
     # Only the static part of the frame which won't be occluded should be used for key point detection.
     # Create the composite mask which contains of a couple of polygons.
-    rois_dict, roi_compostite_mask = createROIMask(f'input_files/JSON/{args.rois}.json', ref_gray)
-
+    rois_dict, roi_compostite_mask  = createROIMask(f'input_files/JSON/{args.rois}.json', ref_gray)
+    # Define the the boundaries of object detection in the screen.
+    zoom_dict, zoom_compostite_mask = createROIMask(f'input_files/JSON/{args.zoom}.json', ref_gray)
+    zoom_compostite_mask = cv2.cvtColor(zoom_compostite_mask, cv2.COLOR_GRAY2BGR) # It has to be applied in all 3 channels.
     # Initialize ORB detector. 
     # This algorithm is used to estimate the camera movements (translation, rotation, and scale) to stabilize the camera movements.
     # Camera movements cause the polygons location instability. The lane and marking polygons location must always match with their physical location on the road.
@@ -295,12 +298,17 @@ if __name__ == "__main__":
             adjusted_lanes = adjustPolygons(lanes_dict, smoothed_homography)
             adjusted_markings = adjustPolygons(markings_dict, smoothed_homography)
             
+            # Mask the input frame to limit the detected vehicle to the area of interest. 
+            # It has to be after adjusting the lanes to make sure there is enough features in the screen to estimate the camera movements.
+            zoomed_frame = cv2.bitwise_and(curr_frame, zoom_compostite_mask)
+
+
             if (frame_count // args.logstep > last_reported_frame // args.logstep):
                 last_reported_frame += args.logstep # Print a log every 1000 frames
                 logProgress(frame_count, total_frames, start_time)
-                results = model.track(curr_frame, persist=True, retina_masks=True, verbose=True)
+                results = model.track(zoomed_frame, persist=True, retina_masks=True, verbose=True)
             else:
-                results = model.track(curr_frame, persist=True, retina_masks=True, verbose=False)
+                results = model.track(zoomed_frame, persist=True, retina_masks=True, verbose=False)
             # Result length will be >1  if you submit a batch for prediction.
 
             ### DEBUG ###
@@ -344,7 +352,7 @@ if __name__ == "__main__":
                                         # Exclude partially detected vehicles. When a vehicle is on edges of the screen, it is partially visible to the camera and the segmentation does not represent the whole vehicle. Additionally, the view is occluded.
                                         if((ratio < threshold) & (not isHitAtTheBottom(ymax, screenHeights))):
                                             if track_id not in hit_set: # Only print the the first hit of the vehicle
-                                                print(f"\nVehicle with Obeject_id {track_id} hitted {zone_id} in frame {frame_count}!")
+                                                print(f"\nVehicle with Object_id {track_id} hitted {zone_id} in frame {frame_count}!")
                                             hit_detected_in_the_frame = True
                                             hit_set.add(track_id)
                                             # Save the unannotated frame.
