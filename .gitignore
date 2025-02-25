@@ -5,9 +5,11 @@ hit_road_marking_tracker/.conda/
 hit_road_marking_tracker/.ipynb_checkpoints/
 hit_road_marking_tracker/jobs/
 hit_road_marking_tracker/model/
+hit_road_marking_tracker/logs/
 
 # ignore files:
 hit_road_marking_tracker/*.pt
 hit_road_marking_tracker/*.xlsx
+hit_road_marking_tracker/test_code.py
 
 

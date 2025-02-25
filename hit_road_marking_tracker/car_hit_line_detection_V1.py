@@ -7,7 +7,6 @@ from shapely.geometry import Point, Polygon, MultiPolygon
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator, colors
 from collections import defaultdict
-from datetime import datetime
 import pandas as pd
 # print("all libraries are imported")
 
@@ -26,6 +25,31 @@ def plot(masks, boxes, height):
     plt.show()
 
 def loadPolygon(relative_path, image_name):
+    ### CVAT INPUT
+    # xml_directory = os.path.join(os.getcwd(), relative_path)
+    # tree = ET.parse(f'{xml_directory}')
+    # root = tree.getroot()
+    # print(f'image name is {image_name}')
+    # for image in root.findall("image"):
+    #     if image.get("name") == image_name:
+    #         polygons = image.findall('polygon')
+    #         poly_dict = dict()
+    #         for polygon in polygons:
+    #             label = polygon.get('label')
+    #             id = polygon.find('attribute')
+    #             if id != None:
+    #                 label = label+id.text
+    #             points_list = (polygon.get('points')).split(';')
+    #             points = [list(map(float, point.split(','))) for point in points_list]
+    #             _polygon = Polygon(points) # For geometry operations.
+    #             _coords = [tuple(map(float, point.split(','))) for point in points_list]
+    #             _coords = np.array([_coords], dtype=np.int32) # For frame/pixel operations.
+    #             poly_dict[label] = {
+    #                 'polygon': _polygon,
+    #                 'coords': _coords
+    #             }
+    #         return poly_dict
+    # print('Error: could not the load polygons!')
 
     ### LABEL STUDIO INPUT
     file_path = os.path.join(os.getcwd(), relative_path)
@@ -53,6 +77,37 @@ def loadPolygon(relative_path, image_name):
 
 
 def createROIMask(relative_path, base_frame):
+    ### CVAT Input
+    # file_path = os.path.join(os.getcwd(), relative_path)
+    # tree = ET.parse(f'{file_path}')
+    # root = tree.getroot()
+    # rois = root.findall('.//polygon') # Regions Of Interest are locations in the image where we are looking for key points to adjust the camera rotation/shift.
+    
+    # rois_dict = dict()
+    # roi_masks_list = []
+    # cnt = 0
+
+    # for polygon in rois:
+    #     cnt += 1 # An enumerator to distinguish between different polygons. Can also be addressed in the input file.
+    #     label = f"{polygon.get('label')}_{cnt}"
+    #     # Re-format the points coordinate to create an image mask. The mask confines the location of the key points.
+    #     points_list = (polygon.get('points')).split(';')
+    #     points = [tuple(map(float, point.split(','))) for point in points_list]
+    #     roi_vertices = np.array([points], dtype=np.int32)
+    #     roi_mask = np.zeros_like(base_frame)
+    #     cv2.fillPoly(roi_mask, roi_vertices, 255) # The mask is a black and white filter for bitwise operation.
+    #     rois_dict[label] = {
+    #         'vertices': roi_vertices,
+    #         'mask': roi_mask
+    #     }
+    #     roi_masks_list.append(roi_mask)
+
+    # roi_compostite_mask = roi_masks_list[0]
+    # for mask in roi_masks_list[1:]:
+    #     roi_compostite_mask = cv2.bitwise_or(roi_compostite_mask, mask)
+
+    # return rois_dict, roi_compostite_mask
+
     ### Label Studio Input
     file_path = os.path.join(os.getcwd(), relative_path)
     with open(file_path, 'r') as f:
@@ -69,7 +124,7 @@ def createROIMask(relative_path, base_frame):
             heightScaleFactor = annotation['original_height'] / 100.0
             original_coord_points = [[w * widthScaleFactor, h * heightScaleFactor] for w, h in annotation['points']]
             roi_vertices = np.array(original_coord_points, dtype=np.int32).reshape(-1, 1, 2)
-            roi_mask = np.zeros_like(base_frame, dtype=np.uint8)
+            roi_mask = np.zeros_like(base_frame)
             cv2.fillPoly(roi_mask, [roi_vertices], 255) # The mask is a black and white filter for bitwise operation.
             rois_dict[label] = {
                 'vertices': roi_vertices,
@@ -83,11 +138,11 @@ def createROIMask(relative_path, base_frame):
 
     return rois_dict, roi_compostite_mask
 
-def displayKeyPoints(frame, key_points, mask):
-    frame_with_keypoints = cv2.drawKeypoints(frame, key_points, mask, color=(0, 255, 0), flags=0)
-    cv2.imshow("Keypoints in Multiple ROIs", frame_with_keypoints)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+# def displayKeyPoints(frame, key_points, mask):
+#     frame_with_keypoints = cv2.drawKeypoints(frame, key_points, mask, color=(0, 255, 0), flags=0)
+#     cv2.imshow("Keypoints in Multiple ROIs", frame_with_keypoints)
+#     cv2.waitKey(0)
+#     cv2.destroyAllWindows()
 
 def getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, frame, roi_compostite_mask, smoothed_homography):
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -107,9 +162,8 @@ def getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, frame, roi_compostite_ma
     dst_pts = np.float32([kp[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
     ### DEBUG ###
-    if args.debug:
-        matches_img = cv2.drawMatches(ref_gray, ref_kp, frame_gray, kp, good_matches, None)
-        cv2.imshow("Matches", matches_img)
+    # matches_img = cv2.drawMatches(ref_gray, ref_kp, frame_gray, kp, good_matches, None)
+    # cv2.imshow("Matches", matches_img)
 
     # Compute homography if enough matches found
     if len(good_matches) >= 10:
@@ -167,16 +221,6 @@ def addToVehicleHistory(history, track_id, zone_id):
 def isHitAtTheBottom(hitYMax, screenHeight):
     return (hitYMax > 0.93 * screenHeight)
 
-def logProgress(frame_count, total_frames, start_time):
-    current_time = datetime.now()
-    print(f'\n#### {int(frame_count/total_frames*100)}% COMPLETED ####')
-    elapsed_time = time.time() - start_time
-    hours, remainder = divmod(elapsed_time, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    print(f"Elapsed time: {int(hours):02}:{int(minutes):02}:{int(seconds):02}")
-    print(f'Processed {frame_count} frames out of {total_frames} by {current_time.strftime("%Y-%m-%d %H:%M:%S")}')
-    print(f"Process time per frame in frame {frame_count}:")
-
 ###########################################################################################################################################
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Segmentation and Tracking with YOLO")
@@ -185,9 +229,6 @@ if __name__ == "__main__":
     parser.add_argument("--lanes", type=str, required=True, help="road's lanes polygon boundaries")
     parser.add_argument("--markings", type=str, required=True, help="road's orange markinging polygon boundaries")
     parser.add_argument("--rois", type=str, required=True, help="regions of interest polygon boundaries")
-    parser.add_argument("--skipframes", type=int, required=False, default=0, help="number of frames to be skipped between analyzed frames")
-    parser.add_argument("--logstep", type=int, required=False, default=1000, help="log the progress every logstep frames")
-    parser.add_argument("--debug", type=bool, required=False, default=False, help="run in debug mode for more info")
     args = parser.parse_args()
 
     print("------ INPUT FILES -----")
@@ -254,8 +295,7 @@ if __name__ == "__main__":
     ref_kp, ref_des = orb.detectAndCompute(ref_gray, roi_compostite_mask)
 
     ### DEBUG ###
-    if args.debug:
-        displayKeyPoints(ref_gray, ref_kp, roi_compostite_mask)
+    # displayKeyPoints(ref_gray, ref_kp, roi_compostite_mask)
 
     smoothed_homography = None
     alpha = 0.8 # Smoothing factor for jittery frame stabilization (higher = more smoothing)
@@ -275,10 +315,10 @@ if __name__ == "__main__":
         'shoulder1': set(),
         'shoulder2': set(),
         'lane1': set(),
-        'lane2': set()
+        'lane2': set(),
+        # 'lane3': set()
     }
     hit_set = set()
-    last_reported_frame = -1
     frame_count = 0
     error_counter = 0
     start_time = time.time()
@@ -289,27 +329,30 @@ if __name__ == "__main__":
         if not ret:
             print("Video frame is empty or video processing has been successfully completed.")
             break
-        if(frame_count % (args.skipframes + 1) == 0): # skip frames to speed-up. It comes at the cost of reduced accuracy (possibly missing a barely hit situation).
+        if(frame_count % 3 == 0): # skip frames to speed-up. It comes at the cost of reduced accuracy (possibly missing a barely hit situation).
             # Adjust the polygons locations w.r.t the camera movements.
             smoothed_homography = getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, curr_frame, roi_compostite_mask, smoothed_homography)
             adjusted_lanes = adjustPolygons(lanes_dict, smoothed_homography)
             adjusted_markings = adjustPolygons(markings_dict, smoothed_homography)
-            
-            if (frame_count // args.logstep > last_reported_frame // args.logstep):
-                last_reported_frame += args.logstep # Print a log every 1000 frames
-                logProgress(frame_count, total_frames, start_time)
+
+            # results = model.track(curr_frame, persist=True, imgsz=(1088, 1920), retina_masks=True)
+            if (frame_count % 1000 == 0):
+                print(f'\n#### {int(frame_count/total_frames*100)}% COMPLETED ####')
+                elapsed_time = time.time() - start_time
+                print(f"Elapsed Time: {elapsed_time:.2f} seconds")
+                print(f'Processed {frame_count} frames out of {total_frames} by {time.strftime("%H:%M:%S", time.localtime(time.time() - start_time))}')
+                print(f"Process time per frame:")
                 results = model.track(curr_frame, persist=True, retina_masks=True, verbose=True)
             else:
                 results = model.track(curr_frame, persist=True, retina_masks=True, verbose=False)
             # Result length will be >1  if you submit a batch for prediction.
 
             ### DEBUG ###
-            if args.debug:
-                # print(f"MARKINGS --> {adjusted_markings['lane1']['polygon']}")
-                curr_frame = drawPolygonsOnFrame(adjusted_markings['lane1']['polygon'], curr_frame, (255, 0, 0)) 
-                curr_frame = drawPolygonsOnFrame(adjusted_markings['lane2']['polygon'], curr_frame, (255, 0, 0)) 
-                # label the hitted object.
-                annotator = Annotator(curr_frame, line_width=2)
+            # print(f"MARKINGS --> {adjusted_markings['lane1']['polygon']}")
+            # curr_frame = drawPolygonsOnFrame(adjusted_markings['lane1']['polygon'], curr_frame, (255, 0, 0)) 
+            # curr_frame = drawPolygonsOnFrame(adjusted_markings['lane2']['polygon'], curr_frame, (255, 0, 0)) 
+            # # label the hitted object.
+            # annotator = Annotator(curr_frame, line_width=2)
             ### DEBUG ###
 
             if results[0].boxes.id is not None and results[0].masks is not None:
@@ -327,11 +370,12 @@ if __name__ == "__main__":
                         if  polygon.contains(track_point):
                             lanes_history[zone_id].add(track_id) # Add the vehicle ID to the history of the lane
                             addToVehicleHistory(vehicles_history, track_id, zone_id)
+                            # print(f"Object with ID={track_id} is in {zone_id}")
                             # Check if the object hits the line (note: each zone has its own line)
                             # We are only detecting the hit to one side of the vehicle.
                             # Now, we know the tracked object is in one of the zones.
                             # Create a geometry out of the detected mask and check whether the tracked object hit the orange marking or not?
-                            if (zone_id in ['lane1', 'lane2']):
+                            if (zone_id in ['lane1', 'lane2', 'lane3']):
                                 try:
                                     hit_polygon = adjusted_markings[zone_id]['polygon'].intersection(Polygon(mask))
                                     if not (hit_polygon.is_empty): # A hit is detected
@@ -343,8 +387,7 @@ if __name__ == "__main__":
                                         threshold = 0.15 # This parameter can be adjusted to get more accurate hits. It is the ratio of the hit's height to the bounding box's height.
                                         # Exclude partially detected vehicles. When a vehicle is on edges of the screen, it is partially visible to the camera and the segmentation does not represent the whole vehicle. Additionally, the view is occluded.
                                         if((ratio < threshold) & (not isHitAtTheBottom(ymax, screenHeights))):
-                                            if track_id not in hit_set: # Only print the the first hit of the vehicle
-                                                print(f"\nVehicle with Obeject_id {track_id} hitted {zone_id} in frame {frame_count}!")
+                                            print(f"Vehicle with Obeject_id {track_id} hitted {zone_id} in frame {frame_count}!")
                                             hit_detected_in_the_frame = True
                                             hit_set.add(track_id)
                                             # Save the unannotated frame.
@@ -365,16 +408,16 @@ if __name__ == "__main__":
                                     error_counter += 1
                                     print(f"Error: {e}")
                     
-            if args.debug:
-                cv2.imshow("instance-segmentation-object-tracking", curr_frame)
+            # cv2.imshow("instance-segmentation-object-tracking", curr_frame)
+            # if frame_count == 10:
+            #     break
         frame_count+=1
-        if args.debug:
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
 
     cap.release()
-    if args.debug:
-        cv2.destroyAllWindows()
+    # cv2.destroyAllWindows()
     end_time = time.time()
     hours, remainder = divmod(end_time - start_time, 3600)
     minutes, seconds = divmod(remainder, 60)
