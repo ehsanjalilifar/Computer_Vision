@@ -154,11 +154,11 @@ def saveFrame(dir, track_id, frame_count, frame):
 def drawPolygonsOnFrame(poly, frame, color):
     if isinstance(poly, Polygon):
         polygon_points = np.array(list(poly.exterior.coords), dtype=np.int32)
-        cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=1) # illustrated the hitted area.
+        cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=1) # illustrated the hit area.
     elif isinstance(poly, MultiPolygon):
         for _poly in poly.geoms:
             polygon_points = np.array(list(_poly.exterior.coords), dtype=np.int32)
-            cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=1) # illustrated the hitted area.
+            cv2.polylines(frame, [polygon_points], isClosed=True, color=color, thickness=1) # illustrated the hit area.
     return frame
 
 def addToVehicleHistory(history, track_id, zone_id):
@@ -247,6 +247,7 @@ if __name__ == "__main__":
     # Define the the boundaries of object detection in the screen.
     zoom_dict, zoom_compostite_mask = createROIMask(f'input_files/JSON/{args.zoom}.json', ref_gray)
     zoom_compostite_mask = cv2.cvtColor(zoom_compostite_mask, cv2.COLOR_GRAY2BGR) # It has to be applied in all 3 channels.
+    
     # Initialize ORB detector. 
     # This algorithm is used to estimate the camera movements (translation, rotation, and scale) to stabilize the camera movements.
     # Camera movements cause the polygons location instability. The lane and marking polygons location must always match with their physical location on the road.
@@ -316,7 +317,7 @@ if __name__ == "__main__":
                 # print(f"MARKINGS --> {adjusted_markings['lane1']['polygon']}")
                 curr_frame = drawPolygonsOnFrame(adjusted_markings['lane1']['polygon'], curr_frame, (255, 0, 0)) 
                 curr_frame = drawPolygonsOnFrame(adjusted_markings['lane2']['polygon'], curr_frame, (255, 0, 0)) 
-                # label the hitted object.
+                # label the hit object.
                 annotator = Annotator(curr_frame, line_width=2)
             ### DEBUG ###
 
@@ -352,20 +353,20 @@ if __name__ == "__main__":
                                         # Exclude partially detected vehicles. When a vehicle is on edges of the screen, it is partially visible to the camera and the segmentation does not represent the whole vehicle. Additionally, the view is occluded.
                                         if((ratio < threshold) & (not isHitAtTheBottom(ymax, screenHeights))):
                                             if track_id not in hit_set: # Only print the the first hit of the vehicle
-                                                print(f"\nVehicle with Object_id {track_id} hitted {zone_id} in frame {frame_count}!")
+                                                print(f"\nVehicle with Object_id {track_id} hit {zone_id} in frame {frame_count}!")
                                             hit_detected_in_the_frame = True
                                             hit_set.add(track_id)
                                             # Save the unannotated frame.
                                             saveFrame(clean_dir, track_id, frame_count, curr_frame)
                                             # Draw the marking for debugging.
                                             curr_frame = drawPolygonsOnFrame(adjusted_markings[zone_id]['polygon'], curr_frame, (51, 51, 51)) 
-                                            # label the hitted object.
+                                            # label the hit object.
                                             annotator = Annotator(curr_frame, line_width=1)
                                             annotator.seg_bbox(mask=mask,
                                                 mask_color=colors(track_id, True),
                                                 label=f"{zone_id}_id{track_id}",
                                                 txt_color=(0,0,0))
-                                            # Highlight the hitted area.
+                                            # Highlight the hit area.
                                             curr_frame = drawPolygonsOnFrame(hit_polygon, curr_frame, (255, 0, 0))
                                             # Save the annotated frame.
                                             saveFrame(annotated_dir, track_id, frame_count, curr_frame)
