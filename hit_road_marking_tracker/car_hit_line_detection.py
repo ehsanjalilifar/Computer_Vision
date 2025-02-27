@@ -7,7 +7,7 @@ from shapely.geometry import Point, Polygon, MultiPolygon
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator, colors
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 # print("all libraries are imported")
 
@@ -25,8 +25,18 @@ def plot(masks, boxes, height):
         plt.scatter(box[0], height-box[1], s=10)
     plt.show()
 
-def loadPolygon(relative_path, image_name):
+def loadRecordingTime(video_name):
+    xml_directory = os.path.join(os.getcwd(), f'input_files/XMLs/recording_start_time/{video_name}.xml')
+    tree = ET.parse(f'{xml_directory}')
+    root = tree.getroot()
+    start_time =  root.find(".//StartTime").text
+    end_time =  root.find(".//StopTime").text
+    start_time_dt = datetime.strptime(start_time[:-1], "%Y-%m-%dT%H:%M:%S.%f")
+    end_time_dt = datetime.strptime(end_time[:-1], "%Y-%m-%dT%H:%M:%S.%f")
+    return start_time_dt, end_time_dt
 
+
+def loadPolygon(relative_path, image_name):
     ### LABEL STUDIO INPUT
     file_path = os.path.join(os.getcwd(), relative_path)
     with open(file_path, 'r') as f:
@@ -177,6 +187,95 @@ def logProgress(frame_count, total_frames, start_time):
     print(f'Processed {frame_count} frames out of {total_frames} by {current_time.strftime("%Y-%m-%d %H:%M:%S")}')
     print(f"Process time per frame in frame {frame_count}:")
 
+def logTrafficAnalytics(vehicles_history, save=False, filename='unknown', ):
+    history_df = pd.DataFrame.from_dict(vehicles_history, orient='index', columns=['lane1', 'lane2'])
+    history_df.to_csv('lane_changes_history.csv')
+
+    # Traffic Volume and Lane Changing Events
+    print("\n### Lane Changes Summary ###")
+    pairs = [['shoulder1', 'lane1'], ['lane1', 'lane2'], ['lane2', 'shoulder2']]
+    sum_lane_changes = 0
+    if save: 
+        lane_change_file_path = os.path.join(os.getcwd(), f'result_files/{filename}/summary/lane_changes.csv')
+        file = open(lane_change_file_path, mode='w', newline='')
+        writer = csv.writer(file)
+        writer.writerow(['lane #1', 'lane #2', 'number_of_lane_changes'])
+    for pair in pairs:
+        lane1_history = lanes_history[pair[0]]
+        lane2_history = lanes_history[pair[1]]
+        n_lane_changes = len(lane1_history & lane2_history)
+        sum_lane_changes += n_lane_changes
+        print(f"Number of lane changes between {pair[0]} and {pair[1]} = {n_lane_changes}")
+        if save:
+            writer.writerow([pair[0], pair[1], n_lane_changes])
+    if save:
+        file.close()
+
+    print("\n### Traffic Volume ### ")
+    
+    total_set = set()
+    if save:
+        volume_file_path = os.path.join(os.getcwd(), f'result_files/{source_filename[:-4]}/summary/traffic_volumes.csv')
+        file = open(volume_file_path, mode='w', newline='')
+        writer = csv.writer(file)
+        writer.writerow(['lane #1', 'vehicle_counts'])
+    for lane, vehicles_set in lanes_history.items():
+        print(f"Vehicles count in {lane} = {len(vehicles_set)}")
+        if save:
+            writer.writerow([lane, len(vehicles_set)])
+        total_set = total_set | vehicles_set
+    
+    print(f"Total road volume = {len(total_set)}")
+    if save:
+        writer.writerow(['All', len(total_set)])
+        writer.writerow(['TOTAL HITS', len(hit_set)])
+        writer.writerow(['TOTAL LANE CHANGES', sum_lane_changes])
+        writer.writerow(['TOTAL HITS EXCLUDING LANE CHANGES', len(hit_set) - sum_lane_changes])
+        file.close()
+
+    print(f'\nTOTAL NUMBER OF HITS = {len(hit_set)}')
+    print(f'TOTAL NUMBER OF LANE CHANGES = {sum_lane_changes}')
+    print(f'TOTAL NUMBER OF HITS EXCLUDING LANE CHANGES = {len(hit_set) - sum_lane_changes}')
+
+def logHit(track_id, frame_count, fps, recording_start_time, hit_records, output):
+    video_time = 1.0 * frame_count / fps
+    hours, remainder = divmod(video_time, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    video_time_formatted = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+    local_timestamp = recording_start_time + timedelta(seconds=video_time)
+    if track_id not in hit_records: # It's a new hit to be recorded
+        print(f"\nVehicle with Object_id {track_id} hit {zone_id} in frame {frame_count} at video time {video_time_formatted} with timestamp {local_timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}!")
+        hit_records[track_id] = {
+            'track_id': track_id,
+            'frame_start': frame_count,
+            'frame_end': frame_count,
+            'video_start_time': video_time_formatted,
+            'video_end_time': video_time_formatted,
+            'local_start_timestamp': local_timestamp,
+            'local_end_timestamp': local_timestamp
+        }
+    else: # Update the hit record
+        # update the ends only
+        hit_records[track_id]['frame_end'] = frame_count
+        hit_records[track_id]['video_end_time'] = video_time_formatted
+        hit_records[track_id]['local_end_timestamp'] = local_timestamp
+
+    filepath = os.path.join(os.getcwd(), f'result_files/{output}/summary/hit_records_{output}.csv')
+    with open(filepath, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        headers = []
+        for record in hit_records.values():
+            for key in record:
+                headers.append(key)
+            break
+        writer.writerow(headers)
+        for record in hit_records.values():
+            row = []
+            for data in record.values():
+                row.append(data)
+            writer.writerow(row)
+
+
 ###########################################################################################################################################
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Segmentation and Tracking with YOLO")
@@ -193,6 +292,8 @@ if __name__ == "__main__":
 
     print("------ INPUT FILES -----")
     video_name = args.source[:-4]
+    recording_start_time, recording_end_time = loadRecordingTime(video_name)
+    print(f"Recording start at {recording_start_time} and stopped at {recording_end_time} local time zone.")
     # lanes_dic contains the lanes' geometries. Key is the lane name and value is the polygon geometry.
     # lanes_dict = loadPolygon(f'input_files/XMLs/{args.lanes}.xml', f'frame_zero_{video_name}.png')
     lanes_dict = loadPolygon(f'input_files/JSON/{args.lanes}.json', f'frame_zero_{video_name}')
@@ -251,8 +352,9 @@ if __name__ == "__main__":
     # Initialize ORB detector. 
     # This algorithm is used to estimate the camera movements (translation, rotation, and scale) to stabilize the camera movements.
     # Camera movements cause the polygons location instability. The lane and marking polygons location must always match with their physical location on the road.
-    # orb = cv2.ORB_create(scaleFactor=1.8)
-    orb = cv2.SIFT_create()
+    orb = cv2.ORB_create(scaleFactor=1.8)
+    # orb = cv2.SIFT_create()
+    # orb = cv2.AKAZE_create()
 
     # Find the key points and descriptors in the reference frame (frame_zero)
     ref_kp, ref_des = orb.detectAndCompute(ref_gray, roi_compostite_mask)
@@ -281,15 +383,17 @@ if __name__ == "__main__":
         'lane1': set(),
         'lane2': set()
     }
-    hit_set = set()
-    last_reported_frame = -1
-    frame_count = 0
+    hit_set = set() # A set to keep track of the unique hits occured.
+    hit_records = dict() # A dictionary to keep records of the hits to be saved at the end of the analysis.
+    last_reported_frame = -1 # A dummy counter used printing log every 1000 frames.
+    frame_count = 0 # A counter to store the current frame number when looping through the video frames.
     error_counter = 0
-    start_time = time.time()
+    start_time = time.time() # Used to keep track of the computation time.
     while True:
         hit_detected_in_the_frame = False # If any hit detected, the screenshot with annotation must be saved to a file.
 
         ret, curr_frame = cap.read()
+        # poly_adjust_time = time.time()
         if not ret:
             print("Video frame is empty or video processing has been successfully completed.")
             break
@@ -298,19 +402,22 @@ if __name__ == "__main__":
             smoothed_homography = getHomographyMatrix(orb, ref_gray, ref_kp, ref_des, curr_frame, roi_compostite_mask, smoothed_homography)
             adjusted_lanes = adjustPolygons(lanes_dict, smoothed_homography)
             adjusted_markings = adjustPolygons(markings_dict, smoothed_homography)
-            
+            # print(f"Adjusting Polygons time: {time.time() - poly_adjust_time} sec")  
             # Mask the input frame to limit the detected vehicle to the area of interest. 
             # It has to be after adjusting the lanes to make sure there is enough features in the screen to estimate the camera movements.
             zoomed_frame = cv2.bitwise_and(curr_frame, zoom_compostite_mask)
 
-
+            # yolo_time = time.time()
             if (frame_count // args.logstep > last_reported_frame // args.logstep):
                 last_reported_frame += args.logstep # Print a log every 1000 frames
                 logProgress(frame_count, total_frames, start_time)
                 results = model.track(zoomed_frame, persist=True, retina_masks=True, verbose=True)
+                logTrafficAnalytics(vehicles_history)
             else:
                 results = model.track(zoomed_frame, persist=True, retina_masks=True, verbose=False)
             # Result length will be >1  if you submit a batch for prediction.
+            
+            # print(f"YOLO time: {time.time() - yolo_time} sec")
 
             ### DEBUG ###
             if args.debug:
@@ -321,6 +428,7 @@ if __name__ == "__main__":
                 annotator = Annotator(curr_frame, line_width=2)
             ### DEBUG ###
 
+            # geo_calc_time = time.time()
             if results[0].boxes.id is not None and results[0].masks is not None:
                 masks = results[0].masks.xy
                 boxes = results[0].boxes.xywh.cpu().numpy()
@@ -352,8 +460,7 @@ if __name__ == "__main__":
                                         threshold = 0.15 # This parameter can be adjusted to get more accurate hits. It is the ratio of the hit's height to the bounding box's height.
                                         # Exclude partially detected vehicles. When a vehicle is on edges of the screen, it is partially visible to the camera and the segmentation does not represent the whole vehicle. Additionally, the view is occluded.
                                         if((ratio < threshold) & (not isHitAtTheBottom(ymax, screenHeights))):
-                                            if track_id not in hit_set: # Only print the the first hit of the vehicle
-                                                print(f"\nVehicle with Object_id {track_id} hit {zone_id} in frame {frame_count}!")
+                                            logHit(track_id, frame_count, fps, recording_start_time, hit_records, source_filename[:-4])
                                             hit_detected_in_the_frame = True
                                             hit_set.add(track_id)
                                             # Save the unannotated frame.
@@ -373,7 +480,7 @@ if __name__ == "__main__":
                                 except Exception as e:
                                     error_counter += 1
                                     print(f"Error: {e}")
-                    
+            # print(f"geo calc time: {time.time() - geo_calc_time} sec\n")       
             if args.debug:
                 cv2.imshow("instance-segmentation-object-tracking", curr_frame)
         frame_count+=1
@@ -388,45 +495,8 @@ if __name__ == "__main__":
     hours, remainder = divmod(end_time - start_time, 3600)
     minutes, seconds = divmod(remainder, 60)
     print()
-    print(f"Analysis succesfully completed.")
+    print(f"Analysis succesfully completed at {datetime.time()}.")
     print(f"{error_counter} exception occurred during analysis!")
     print(f"Elapsed time: {int(hours):02}:{int(minutes):02}:{int(seconds):02}")
-    history_df = pd.DataFrame.from_dict(vehicles_history, orient='index', columns=['lane1', 'lane2'])
-    history_df.to_csv('lane_changes_history.csv')
+    logTrafficAnalytics(vehicles_history=vehicles_history, save=True, filename=source_filename[:-4])
 
-    # Traffic Volume and Lane Changing Events
-    print("\n### Lane Changes Summary ###")
-    lane_change_file_path = os.path.join(os.getcwd(), f'result_files/{source_filename[:-4]}/summary/lane_changes.csv')
-    pairs = [['shoulder1', 'lane1'], ['lane1', 'lane2'], ['lane2', 'shoulder2']]
-    sum_lane_changes = 0
-    with open(lane_change_file_path, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['lane #1', 'lane #2', 'number_of_lane_changes'])
-        for pair in pairs:
-            lane1_history = lanes_history[pair[0]]
-            lane2_history = lanes_history[pair[1]]
-            n_lane_changes = len(lane1_history & lane2_history)
-            sum_lane_changes += n_lane_changes
-            print(f"Number of lane changes between {pair[0]} and {pair[1]} = {n_lane_changes}")
-            writer.writerow([pair[0], pair[1], n_lane_changes])
-
-    print("\n### Traffic Volume ### ")
-    volume_file_path = os.path.join(os.getcwd(), f'result_files/{source_filename[:-4]}/summary/traffic_volumes.csv')
-    total_set = set()
-    with open(volume_file_path, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['lane #1', 'vehicle_counts'])
-        for lane, vehicles_set in lanes_history.items():
-            print(f"Vehicles count in {lane} = {len(vehicles_set)}")
-            writer.writerow([lane, len(vehicles_set)])
-            total_set = total_set | vehicles_set
-    
-        print(f"Total road volume = {len(total_set)}")
-        writer.writerow(['All', len(total_set)])
-        writer.writerow(['TOTAL HITS', len(hit_set)])
-        writer.writerow(['TOTAL LANE CHANGES', sum_lane_changes])
-        writer.writerow(['TOTAL HITS EXCLUDING LANE CHANGES', len(hit_set) - sum_lane_changes])
-
-    print(f'\nTOTAL NUMBER OF HITS = {len(hit_set)}')
-    print(f'TOTAL NUMBER OF LANE CHANGES = {sum_lane_changes}')
-    print(f'TOTAL NUMBER OF HITS EXCLUDING LANE CHANGES = {len(hit_set) - sum_lane_changes}')
